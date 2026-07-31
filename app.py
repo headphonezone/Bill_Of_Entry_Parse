@@ -76,25 +76,38 @@ if uploaded is not None:
         items_df = pd.DataFrame(item_rows)
         st.dataframe(items_df, use_container_width=True, height=400)
 
-    # Excel export - Items sheet only
+    licence_rows = []
+    for lic in parsed["licences"]:
+        r = {"BOE No": be_no, "Shipper Name": shipper_name(parsed), "Item #": lic.get("ItemSN", "")}
+        r.update({k: v for k, v in lic.items() if k != "ItemSN"})
+        licence_rows.append(r)
+    licence_df = pd.DataFrame(licence_rows)
+
+    with st.expander(f"Licence details ({len(licence_df)} licences)", expanded=False):
+        st.dataframe(licence_df, use_container_width=True, height=300)
+
+    # Excel export - Items sheet + a Licence Details sheet (one row per
+    # licence, as in the PDF, instead of the ";"-joined single cell used
+    # on the Items sheet).
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         items_df.to_excel(writer, index=False, sheet_name="Items")
+        licence_df.to_excel(writer, index=False, sheet_name="Licence Details")
 
-        # Cells like licence details hold multiple "N) ..." lines separated
-        # by \n (see build_wide_row / parse_part4_pages) - turn on wrap text
-        # so they render as stacked lines instead of one run-on line.
-        ws = writer.sheets["Items"]
-        max_lines = 1
-        for col_idx, col_name in enumerate(items_df.columns, start=1):
-            if items_df[col_name].astype(str).str.contains("\n").any():
+        # Cells that contain embedded newlines get wrap text so they render
+        # as stacked lines instead of one run-on line.
+        for sheet_name, df in (("Items", items_df), ("Licence Details", licence_df)):
+            ws = writer.sheets[sheet_name]
+            max_lines = 1
+            for col_idx, col_name in enumerate(df.columns, start=1):
+                if df[col_name].astype(str).str.contains("\n").any():
+                    for row_idx in range(2, ws.max_row + 1):
+                        cell = ws.cell(row=row_idx, column=col_idx)
+                        cell.alignment = Alignment(wrap_text=True, vertical="top")
+                        max_lines = max(max_lines, str(cell.value or "").count("\n") + 1)
+            if max_lines > 1:
                 for row_idx in range(2, ws.max_row + 1):
-                    cell = ws.cell(row=row_idx, column=col_idx)
-                    cell.alignment = Alignment(wrap_text=True, vertical="top")
-                    max_lines = max(max_lines, str(cell.value or "").count("\n") + 1)
-        if max_lines > 1:
-            for row_idx in range(2, ws.max_row + 1):
-                ws.row_dimensions[row_idx].height = 15 * max_lines
+                    ws.row_dimensions[row_idx].height = 15 * max_lines
     buf.seek(0)
 
     safe_be = re.sub(r"[^A-Za-z0-9_-]", "_", str(be_no) or "BOE")
