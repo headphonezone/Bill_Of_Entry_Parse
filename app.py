@@ -5,6 +5,7 @@ import os
 
 import pandas as pd
 import streamlit as st
+from openpyxl.styles import Alignment
 
 from boe_parser import parse_boe, build_wide_row
 
@@ -84,6 +85,21 @@ if uploaded is not None:
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         wide_df.to_excel(writer, index=False, sheet_name="BOE")
         items_df.to_excel(writer, index=False, sheet_name="Items (reference)")
+
+        # Cells like licence details hold multiple "N) ..." lines separated
+        # by \n (see build_wide_row / parse_part4_pages) - turn on wrap text
+        # so they render as stacked lines instead of one run-on line.
+        ws = writer.sheets["BOE"]
+        max_lines = 1
+        for col_idx, col_name in enumerate(wide_df.columns, start=1):
+            if wide_df[col_name].astype(str).str.contains("\n").any():
+                for row_idx in range(2, ws.max_row + 1):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.alignment = Alignment(wrap_text=True, vertical="top")
+                    max_lines = max(max_lines, str(cell.value or "").count("\n") + 1)
+        if max_lines > 1:
+            for row_idx in range(2, ws.max_row + 1):
+                ws.row_dimensions[row_idx].height = 15 * max_lines
     buf.seek(0)
 
     safe_be = re.sub(r"[^A-Za-z0-9_-]", "_", str(be_no) or "BOE")
