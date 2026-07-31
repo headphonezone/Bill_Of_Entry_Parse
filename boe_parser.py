@@ -356,15 +356,20 @@ def parse_part4_pages(pages):
     """Parse Part IV (Additional Details) pages: a series of lettered
     sections (A. SVB DETAILS, B. PREVIOUS BEs, ... J. SINGLE WINDOW
     DECLARATION, M. SUPPORTING DOCUMENTS, etc.), each a flat table keyed
-    by (INVSNO, ITMSNO). Returns (item_extra, invoice_extra, all_section_cols)
-    where item_extra: {itemsn(str) -> {field: value}}, invoice_extra:
-    {field: value} for rows tagged ITMSNO=0 or with no item column, and
-    all_section_cols: {section_name: [labels]} so every item can be given
-    a consistent (possibly blank) set of columns.
+    by (INVSNO, ITMSNO). Returns (item_extra, invoice_extra, all_section_cols,
+    licence_rows) where item_extra: {itemsn(str) -> {field: value}},
+    invoice_extra: {field: value} for rows tagged ITMSNO=0 or with no item
+    column, all_section_cols: {section_name: [labels]} so every item can be
+    given a consistent (possibly blank) set of columns, and licence_rows:
+    a list of one dict per licence-section row exactly as it appeared in
+    the PDF (itemsn + each column label:value), kept separate from the
+    per-label flattening above so a dedicated sheet can show one row per
+    licence instead of the ";"-joined single cell.
     """
     item_extra = {}
     invoice_extra = {}
     all_section_cols = {}
+    licence_rows = []
 
     current_section = None
     label_cols = None  # list of (col_idx, label)
@@ -411,6 +416,15 @@ def parse_part4_pages(pages):
             if itmsno and re.match(r"^\d+$", itmsno) and itmsno != "0":
                 target = item_extra.setdefault(itmsno, {})
 
+            if "LICENCE" in current_section.upper() or "LICENSE" in current_section.upper():
+                row_entry = {"ItemSN": itmsno}
+                for label, val in data.items():
+                    if label.upper() in ("INVSNO", "INVSN", "ITMSNO", "ITEMSN"):
+                        continue
+                    row_entry[label] = val
+                if any(v for k, v in row_entry.items() if k != "ItemSN"):
+                    licence_rows.append(row_entry)
+
             for label, val in data.items():
                 if label.upper() in ("INVSNO", "INVSN", "ITMSNO", "ITEMSN"):
                     continue
@@ -428,7 +442,7 @@ def parse_part4_pages(pages):
                     else:
                         invoice_extra[key] = val
 
-    return item_extra, invoice_extra, all_section_cols
+    return item_extra, invoice_extra, all_section_cols, licence_rows
 
 
 def parse_boe(path):
@@ -436,6 +450,8 @@ def parse_boe(path):
       - header: dict of BOE-level fields (Part I)
       - invoice: dict of invoice/valuation-level fields (Part II, excl. items)
       - items: dict itemsn -> combined flat field dict (Part II item row + Part III duties)
+      - licences: list of one dict per licence row, exactly as it appeared
+        in the PDF (one licence per row, not combined)
     """
     with pdfplumber.open(path) as pdf:
         sections = _identify_sections(pdf)
@@ -461,7 +477,7 @@ def parse_boe(path):
         item_duty = parse_duty_pages(part3_pages)
 
         part4_pages = [pdf.pages[i] for i in sections.get("IV", [])]
-        item_extra, invoice_extra, all_section_cols = parse_part4_pages(part4_pages)
+        item_extra, invoice_extra, all_section_cols, licence_rows = parse_part4_pages(part4_pages)
         invoice.update(invoice_extra)
 
         # merge basic item info + duty info per item, keyed by SNo/ITEMSN
@@ -482,7 +498,7 @@ def parse_boe(path):
             merged.update(item_extra.get(sno, {}))
             items[sno] = merged
 
-        return {"header": header, "invoice": invoice, "items": items}
+        return {"header": header, "invoice": invoice, "items": items, "licences": licence_rows}
 
 
 def build_wide_row(parsed):
