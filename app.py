@@ -68,7 +68,7 @@ if uploaded is not None:
         for sno, fields in parsed["items"].items():
             r = {
                 "BOE No": be_no,
-                "Shipper Name": shipper_name(parsed["header"]),
+                "Shipper Name": shipper_name(parsed),
                 "Item #": sno,
             }
             r.update(fields)
