@@ -117,10 +117,32 @@ def extract_simple_fields(rows):
                 if not multiline:
                     break
             if collected:
-                fields[label] = " ".join(collected) if multiline else collected[0]
+                # Keep line breaks for multiline fields (e.g. "Shipper Name
+                # and Address") so the first line (name) can be split from
+                # the rest (address) later - joining with a plain space
+                # would make that unrecoverable.
+                fields[label] = "\n".join(collected) if multiline else collected[0]
             else:
                 fields.setdefault(label, "")
     return fields
+
+
+def _find_field(d, *keywords):
+    """Find a dict value whose key contains all given keywords (case-insensitive)."""
+    for k, v in d.items():
+        ku = k.upper()
+        if all(kw in ku for kw in keywords):
+            return v
+    return ""
+
+
+def shipper_name(header):
+    """Extract just the shipper's name - the first line of the combined
+    'Shipper Name and Address' field."""
+    raw = _find_field(header, "SHIPPER")
+    if not raw:
+        return ""
+    return raw.split("\n")[0].strip()
 
 
 def parse_label_value_blocks(rows):
@@ -335,6 +357,12 @@ def parse_part4_pages(pages):
     item_extra = {}
     invoice_extra = {}
     all_section_cols = {}
+    # Licence-type sections (e.g. "LICENCE DETAILS") can have several rows
+    # per item (one per licence). Those are collected here as whole-row
+    # entries and combined into a single "N) label: val, ..." line per
+    # licence in one cell, instead of one column per label (#see build_wide_row).
+    item_licence_entries = {}
+    invoice_licence_entries = {}
 
     current_section = None
     label_cols = None  # list of (col_idx, label)
@@ -380,6 +408,24 @@ def parse_part4_pages(pages):
             target = None
             if itmsno and re.match(r"^\d+$", itmsno) and itmsno != "0":
                 target = item_extra.setdefault(itmsno, {})
+
+            is_licence_section = (
+                "LICENCE" in current_section.upper() or "LICENSE" in current_section.upper()
+            )
+            if is_licence_section:
+                entry_parts = [
+                    f"{label}: {val}" for label, val in data.items()
+                    if label.upper() not in ("INVSNO", "INVSN", "ITMSNO", "ITEMSN") and val
+                ]
+                if entry_parts:
+                    entry_str = "; ".join(entry_parts)
+                    if target is not None:
+                        item_licence_entries.setdefault(current_section, {}) \
+                            .setdefault(itmsno, []).append(entry_str)
+                    else:
+                        invoice_licence_entries.setdefault(current_section, []).append(entry_str)
+                continue
+
             for label, val in data.items():
                 if label.upper() in ("INVSNO", "INVSN", "ITMSNO", "ITEMSN"):
                     continue
@@ -396,6 +442,22 @@ def parse_part4_pages(pages):
                         invoice_extra[key] = invoice_extra[key] + "; " + val
                     else:
                         invoice_extra[key] = val
+
+    # Combine each item's licence rows into one cell, one licence per line.
+    for section, by_item in item_licence_entries.items():
+        for itmsno, entries in by_item.items():
+            combined = (
+                "\n".join(f"{i}) {e}" for i, e in enumerate(entries, start=1))
+                if len(entries) > 1 else entries[0]
+            )
+            item_extra.setdefault(itmsno, {})[section] = combined
+
+    for section, entries in invoice_licence_entries.items():
+        if entries:
+            invoice_extra[section] = (
+                "\n".join(f"{i}) {e}" for i, e in enumerate(entries, start=1))
+                if len(entries) > 1 else entries[0]
+            )
 
     return item_extra, invoice_extra, all_section_cols
 
@@ -444,6 +506,12 @@ def parse_boe(path):
             # (blank if this item had no data there), so licence/SVB/etc.
             # columns are always present and ready to populate.
             for section, labels in all_section_cols.items():
+                if "LICENCE" in section.upper() or "LICENSE" in section.upper():
+                    # Licence rows are combined into one cell keyed by the
+                    # section name itself (see parse_part4_pages), not one
+                    # column per original label.
+                    merged.setdefault(section, "")
+                    continue
                 for label in labels:
                     if label.upper() in ("INVSNO", "INVSN", "ITMSNO", "ITEMSN"):
                         continue
@@ -456,8 +524,14 @@ def parse_boe(path):
 
 def build_wide_row(parsed):
     """Flatten parsed BOE dict into a single wide row dict suitable for
-    a 1-row-per-BOE Excel export."""
-    row = {}
+    a 1-row-per-BOE Excel export. "BOE No" and "Shipper Name" are placed
+    first (dict order = column order) since they're the two fields the
+    export is meant to be scanned/sorted by."""
+    header = parsed["header"]
+    row = {
+        "BOE No": header.get("BE No", ""),
+        "Shipper Name": shipper_name(header),
+    }
     for k, v in parsed["header"].items():
         row[f"BOE_{k}"] = v
     for k, v in parsed["invoice"].items():
