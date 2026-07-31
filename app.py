@@ -7,15 +7,15 @@ import pandas as pd
 import streamlit as st
 from openpyxl.styles import Alignment
 
-from boe_parser import parse_boe, build_wide_row
+from boe_parser import parse_boe, build_wide_row, shipper_name
 
-st.set_page_config(page_title="BOE to Excel (Single Row)", page_icon="📄", layout="wide")
+st.set_page_config(page_title="BOE to Excel (Items)", page_icon="📄", layout="wide")
 
-st.title("📄 Bill of Entry → Excel (Single Row per BOE)")
+st.title("📄 Bill of Entry → Excel (Item-level)")
 st.caption(
-    "Upload an ICEGATE-format Bill of Entry PDF. All header, invoice, and "
-    "per-item duty details are flattened into ONE Excel row, with each "
-    "item's fields repeated as Item1_*, Item2_*, ... columns."
+    "Upload an ICEGATE-format Bill of Entry PDF. Each line item becomes "
+    "one Excel row, led by BOE No and Shipper Name, with multi-licence "
+    "items wrapped in a single cell."
 )
 
 uploaded = st.file_uploader("Upload BOE PDF", type=["pdf"])
@@ -66,33 +66,28 @@ if uploaded is not None:
     with st.expander(f"Item-level details ({n_items} items)", expanded=True):
         item_rows = []
         for sno, fields in parsed["items"].items():
-            r = {"Item #": sno}
+            r = {
+                "BOE No": be_no,
+                "Shipper Name": shipper_name(parsed["header"]),
+                "Item #": sno,
+            }
             r.update(fields)
             item_rows.append(r)
         items_df = pd.DataFrame(item_rows)
         st.dataframe(items_df, use_container_width=True, height=400)
 
-    # Build the single-row wide dataframe
-    wide_df = pd.DataFrame([row])
-
-    st.subheader("Single-row export preview")
-    st.write(f"This BOE will export as **1 row × {len(row)} columns**.")
-    st.dataframe(wide_df.iloc[:, :20], use_container_width=True)
-    st.caption("(showing first 20 of the full column set — download for the complete row)")
-
-    # Excel export
+    # Excel export - Items sheet only
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        wide_df.to_excel(writer, index=False, sheet_name="BOE")
-        items_df.to_excel(writer, index=False, sheet_name="Items (reference)")
+        items_df.to_excel(writer, index=False, sheet_name="Items")
 
         # Cells like licence details hold multiple "N) ..." lines separated
         # by \n (see build_wide_row / parse_part4_pages) - turn on wrap text
         # so they render as stacked lines instead of one run-on line.
-        ws = writer.sheets["BOE"]
+        ws = writer.sheets["Items"]
         max_lines = 1
-        for col_idx, col_name in enumerate(wide_df.columns, start=1):
-            if wide_df[col_name].astype(str).str.contains("\n").any():
+        for col_idx, col_name in enumerate(items_df.columns, start=1):
+            if items_df[col_name].astype(str).str.contains("\n").any():
                 for row_idx in range(2, ws.max_row + 1):
                     cell = ws.cell(row=row_idx, column=col_idx)
                     cell.alignment = Alignment(wrap_text=True, vertical="top")
@@ -104,7 +99,7 @@ if uploaded is not None:
 
     safe_be = re.sub(r"[^A-Za-z0-9_-]", "_", str(be_no) or "BOE")
     st.download_button(
-        label="⬇️ Download Excel (single row)",
+        label="⬇️ Download Excel (item-level)",
         data=buf,
         file_name=f"BOE_{safe_be}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
